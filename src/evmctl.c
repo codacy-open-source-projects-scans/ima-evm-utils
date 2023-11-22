@@ -2852,7 +2852,6 @@ static void usage(void)
 		"                     read keyid value from SKID of a x509 cert file\n"
 		"  -o, --portable     generate portable EVM signatures\n"
 		"  -p, --pass         password for encrypted signing key\n"
-		"                     Do not provide password on command line when using -p\n"
 		"  -r, --recursive    recurse into directories (sign)\n"
 		"  -t, --type         file types to fix 'fxm' (f: file)\n"
 		"                     x - skip fixing if both ima and evm xattrs exist (use with caution)\n"
@@ -2959,7 +2958,6 @@ static char *get_password(void)
 	struct termios flags, tmp_flags;
 	char *password, *pwd;
 	int passlen = 64;
-	size_t actlen;
 
 	password = malloc(passlen);
 	if (!password) {
@@ -2992,11 +2990,6 @@ static char *get_password(void)
 		free(password);
 		return NULL;
 	}
-
-	/* strip trailing '\n' */
-	actlen = strlen(password);
-	if (actlen > 0 && password[actlen - 1] == '\n')
-		password[actlen - 1] = 0;
 
 	return password;
 }

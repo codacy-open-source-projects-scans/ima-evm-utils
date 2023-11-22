@@ -40,7 +40,7 @@ matrix:
           compiler: gcc
 
         - os: linux
-          env: DISTRO=ubuntu:lunar TSS=ibmtss
+          env: DISTRO=ubuntu:mantic TSS=ibmtss
           compiler: gcc
 
         - os: linux
