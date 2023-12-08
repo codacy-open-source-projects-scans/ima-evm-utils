@@ -15,13 +15,15 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 
+# shellcheck disable=SC2043
+
 cd "$(dirname "$0")" || exit 1
 PATH=../src:$PATH
 type openssl
 
 log() {
   echo >&2 - "$*"
-  eval "$@"
+  eval "$*"
 }
 
 if [ "$1" = clean ]; then
@@ -71,9 +73,9 @@ for m in 1024 1024_skid 2048; do
     ext=
   fi
   if [ ! -e test-rsa$m.key ]; then
-    log openssl req -verbose -new -nodes -utf8 -sha256 -days 10000 -batch -x509 $ext \
+    log openssl req -verbose -new -nodes -utf8 -sha256 -days 10000 -batch -x509 "$ext" \
       -config test-ca.conf \
-      -newkey rsa:$bits \
+      -newkey "rsa:$bits" \
       -out test-rsa$m.cer -outform DER \
       -keyout test-rsa$m.key
     # for v1 signatures
