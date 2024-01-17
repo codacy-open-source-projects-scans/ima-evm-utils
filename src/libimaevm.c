@@ -181,7 +181,7 @@ out:
 	return err;
 }
 
-int ima_calc_hash(const char *file, uint8_t *hash)
+int ima_calc_hash2(const char *file, const char *hash_algo, uint8_t *hash)
 {
 	const EVP_MD *md;
 	struct stat st;
@@ -202,10 +202,9 @@ int ima_calc_hash(const char *file, uint8_t *hash)
 		goto err;
 	}
 
-	md = EVP_get_digestbyname(imaevm_params.hash_algo);
+	md = EVP_get_digestbyname(hash_algo);
 	if (!md) {
-		log_err("EVP_get_digestbyname(%s) failed\n",
-			imaevm_params.hash_algo);
+		log_err("EVP_get_digestbyname(%s) failed\n", hash_algo);
 		err = 1;
 		goto err;
 	}
@@ -244,6 +243,11 @@ err:
 	EVP_MD_CTX_free(pctx);
 #endif
 	return err;
+}
+
+int ima_calc_hash(const char *file, uint8_t *hash)
+{
+	return ima_calc_hash2(file, imaevm_params.hash_algo, hash);
 }
 
 EVP_PKEY *read_pub_pkey(const char *keyfile, int x509)
@@ -370,14 +374,15 @@ struct public_key_entry {
 	char name[9];
 	EVP_PKEY *key;
 };
-static struct public_key_entry *public_keys = NULL;
+static struct public_key_entry *g_public_keys = NULL;
 
-static EVP_PKEY *find_keyid(uint32_t keyid)
+static EVP_PKEY *find_keyid(struct public_key_entry *public_keys,
+			    uint32_t keyid)
 {
 	struct public_key_entry *entry, *tail = public_keys;
 	int i = 1;
 
-	for (entry = public_keys; entry != NULL; entry = entry->next) {
+	for (entry = public_keys; entry; entry = entry->next) {
 		if (entry->keyid == keyid)
 			return entry->key;
 		i++;
@@ -399,12 +404,32 @@ static EVP_PKEY *find_keyid(uint32_t keyid)
 	return 0;
 }
 
-void init_public_keys(const char *keyfiles)
+void imaevm_free_public_keys(struct public_key_entry *public_keys)
+{
+	struct public_key_entry *entry = public_keys, *next;
+
+	while (entry) {
+		next = entry->next;
+		if (entry->key)
+			free(entry->key);
+		free(entry);
+		entry = next;
+	}
+}
+
+int imaevm_init_public_keys(const char *keyfiles,
+			    struct public_key_entry **public_keys)
 {
 	struct public_key_entry *entry;
 	char *tmp_keyfiles, *keyfiles_free;
 	char *keyfile;
+	int err = 0;
 	int i = 1;
+
+	if (!public_keys)
+		return -EINVAL;
+
+	*public_keys = NULL;
 
 	tmp_keyfiles = strdup(keyfiles);
 	keyfiles_free = tmp_keyfiles;
@@ -417,6 +442,7 @@ void init_public_keys(const char *keyfiles)
 		entry = malloc(sizeof(struct public_key_entry));
 		if (!entry) {
 			perror("malloc");
+			err = -ENOMEM;
 			break;
 		}
 
@@ -429,10 +455,19 @@ void init_public_keys(const char *keyfiles)
 		calc_keyid_v2(&entry->keyid, entry->name, entry->key);
 		sprintf(entry->name, "%x", __be32_to_cpup(&entry->keyid));
 		log_info("key %d: %s %s\n", i++, entry->name, keyfile);
-		entry->next = public_keys;
-		public_keys = entry;
+		entry->next = *public_keys;
+		*public_keys = entry;
 	}
+
 	free(keyfiles_free);
+	if (err < 0)
+		imaevm_free_public_keys(*public_keys);
+	return err;
+}
+
+void init_public_keys(const char *keyfiles)
+{
+	imaevm_init_public_keys(keyfiles, &g_public_keys);
 }
 
 /*
@@ -449,7 +484,9 @@ void init_public_keys(const char *keyfiles)
  *
  * (Note: signature_v2_hdr struct does not contain the 'type'.)
  */
-static int verify_hash_common(const char *file, const unsigned char *hash,
+static int verify_hash_common(struct public_key_entry *public_keys,
+			      const char *file, const char *hash_algo,
+			      const unsigned char *hash,
 			      int size, unsigned char *sig, int siglen)
 {
 	int ret = -1;
@@ -460,11 +497,11 @@ static int verify_hash_common(const char *file, const unsigned char *hash,
 	const char *st;
 
 	if (imaevm_params.verbose > LOG_INFO) {
-		log_info("hash(%s): ", imaevm_params.hash_algo);
+		log_info("hash(%s): ", hash_algo);
 		log_dump(hash, size);
 	}
 
-	pkey = find_keyid(hdr->keyid);
+	pkey = find_keyid(public_keys, hdr->keyid);
 	if (!pkey) {
 		uint32_t keyid = hdr->keyid;
 
@@ -491,7 +528,8 @@ static int verify_hash_common(const char *file, const unsigned char *hash,
 	if (!EVP_PKEY_verify_init(ctx))
 		goto err;
 	st = "EVP_get_digestbyname";
-	if (!(md = EVP_get_digestbyname(imaevm_params.hash_algo)))
+	md = EVP_get_digestbyname(hash_algo);
+	if (!md)
 		goto err;
 	st = "EVP_PKEY_CTX_set_signature_md";
 	if (!EVP_PKEY_CTX_set_signature_md(ctx, md))
@@ -526,11 +564,14 @@ err:
  *
  * Return: 0 verification good, 1 verification bad, -1 error.
  */
-static int verify_hash_v2(const char *file, const unsigned char *hash,
+static int verify_hash_v2(struct public_key_entry *public_keys,
+			  const char *file, const char *hash_algo,
+			  const unsigned char *hash,
 			  int size, unsigned char *sig, int siglen)
 {
 	/* note: signature_v2_hdr does not contain 'type', use sig + 1 */
-	return verify_hash_common(file, hash, size, sig + 1, siglen - 1);
+	return verify_hash_common(public_keys, file, hash_algo, hash, size,
+				  sig + 1, siglen - 1);
 }
 
 /*
@@ -539,18 +580,21 @@ static int verify_hash_v2(const char *file, const unsigned char *hash,
  *
  * Return: 0 verification good, 1 verification bad, -1 error.
  */
-static int verify_hash_v3(const char *file, const unsigned char *hash,
+static int verify_hash_v3(struct public_key_entry *public_keys,
+			  const char *file, const char *hash_algo,
+			  const unsigned char *hash,
 			  int size, unsigned char *sig, int siglen)
 {
 	unsigned char sigv3_hash[MAX_DIGEST_SIZE];
 	int ret;
 
-	ret = calc_hash_sigv3(sig[0], NULL, hash, sigv3_hash);
+	ret = calc_hash_sigv3(sig[0], hash_algo, hash, sigv3_hash);
 	if (ret < 0)
 		return ret;
 
 	/* note: signature_v2_hdr does not contain 'type', use sig + 1 */
-	return verify_hash_common(file, sigv3_hash, size, sig + 1, siglen - 1);
+	return verify_hash_common(public_keys, file, hash_algo, sigv3_hash,
+				  size, sig + 1, siglen - 1);
 }
 
 #define HASH_MAX_DIGESTSIZE 64	/* kernel HASH_MAX_DIGESTSIZE is 64 bytes */
@@ -593,8 +637,10 @@ int calc_hash_sigv3(enum evm_ima_xattr_type type, const char *algo,
 		return -EINVAL;
 	}
 
-	if (!algo)
-		algo = imaevm_params.hash_algo;
+	if (!algo) {
+		log_err("Hash algorithm unspecified\n");
+		return -EINVAL;
+	}
 
 	if ((hash_algo = imaevm_get_hash_algo(algo)) < 0) {
 		log_err("Hash algorithm %s not supported\n", algo);
@@ -693,8 +739,9 @@ int imaevm_hash_algo_from_sig(unsigned char *sig)
 		return -1;
 }
 
-int verify_hash(const char *file, const unsigned char *hash, int size,
-		unsigned char *sig, int siglen)
+int imaevm_verify_hash(struct public_key_entry *public_keys, const char *file,
+		       const char *hash_algo, const unsigned char *hash,
+		       int size, unsigned char *sig, int siglen)
 {
 	/* Get signature type from sig header */
 	if (sig[1] == DIGSIG_VERSION_1) {
@@ -713,18 +760,29 @@ int verify_hash(const char *file, const unsigned char *hash, int size,
 		return -1;
 #endif
 	} else if (sig[1] == DIGSIG_VERSION_2) {
-		return verify_hash_v2(file, hash, size, sig, siglen);
+		return verify_hash_v2(public_keys, file, hash_algo, hash, size,
+				      sig, siglen);
 	} else if (sig[1] == DIGSIG_VERSION_3) {
-		return verify_hash_v3(file, hash, size, sig, siglen);
+		return verify_hash_v3(public_keys, file, hash_algo, hash, size,
+				      sig, siglen);
 	} else
 		return -1;
 }
 
-int ima_verify_signature(const char *file, unsigned char *sig, int siglen,
-			 unsigned char *digest, int digestlen)
+int verify_hash(const char *file, const unsigned char *hash, int size,
+		unsigned char *sig, int siglen)
+{
+	return imaevm_verify_hash(g_public_keys, file, imaevm_params.hash_algo,
+				  hash, size, sig, siglen);
+}
+
+int ima_verify_signature2(struct public_key_entry *public_keys, const char *file,
+			  unsigned char *sig, int siglen,
+			  unsigned char *digest, int digestlen)
 {
 	unsigned char hash[MAX_DIGEST_SIZE];
 	int hashlen, sig_hash_algo;
+	const char *hash_algo;
 
 	if (sig[0] != EVM_IMA_XATTR_DIGSIG && sig[0] != IMA_VERITY_DIGSIG) {
 		log_err("%s: xattr ima has no signature\n", file);
@@ -742,21 +800,31 @@ int ima_verify_signature(const char *file, unsigned char *sig, int siglen,
 		return -1;
 	}
 	/* Use hash algorithm as retrieved from signature */
-	imaevm_params.hash_algo = imaevm_hash_algo_by_id(sig_hash_algo);
+	hash_algo = imaevm_hash_algo_by_id(sig_hash_algo);
 
 	/*
 	 * Validate the signature based on the digest included in the
 	 * measurement list, not by calculating the local file digest.
 	 */
 	if (digest && digestlen > 0)
-		return verify_hash(file, digest, digestlen, sig, siglen);
+		return imaevm_verify_hash(public_keys, file,
+					  hash_algo, digest, digestlen,
+					  sig, siglen);
 
-	hashlen = ima_calc_hash(file, hash);
+	hashlen = ima_calc_hash2(file, hash_algo, hash);
 	if (hashlen <= 1)
 		return hashlen;
 	assert(hashlen <= sizeof(hash));
 
-	return verify_hash(file, hash, hashlen, sig, siglen);
+	return imaevm_verify_hash(public_keys, file, hash_algo, hash, hashlen,
+				  sig, siglen);
+}
+
+int ima_verify_signature(const char *file, unsigned char *sig, int siglen,
+			 unsigned char *digest, int digestlen)
+{
+	return ima_verify_signature2(g_public_keys, file, sig, siglen,
+				     digest, digestlen);
 }
 
 #if CONFIG_SIGV1
@@ -1044,7 +1112,8 @@ static int get_hash_algo_v1(const char *algo)
 }
 
 static int sign_hash_v1(const char *hashalgo, const unsigned char *hash,
-			int size, const char *keyfile, unsigned char *sig)
+			int size, const char *keyfile, const char *keypass,
+			unsigned char *sig)
 {
 	int len = -1, hashalgo_idx;
 	SHA_CTX ctx;
@@ -1078,7 +1147,7 @@ static int sign_hash_v1(const char *hashalgo, const unsigned char *hash,
 	log_info("hash(%s): ", hashalgo);
 	log_dump(hash, size);
 
-	key = read_priv_key(keyfile, imaevm_params.keypass);
+	key = read_priv_key(keyfile, keypass);
 	if (!key)
 		return -1;
 
@@ -1131,7 +1200,8 @@ out:
  * Return: -1 signing error, >0 length of signature
  */
 static int sign_hash_v2(const char *algo, const unsigned char *hash,
-			int size, const char *keyfile, unsigned char *sig)
+			int size, const char *keyfile, const char *keypass,
+			unsigned char *sig)
 {
 	struct signature_v2_hdr *hdr;
 	int len = -1;
@@ -1166,7 +1236,7 @@ static int sign_hash_v2(const char *algo, const unsigned char *hash,
 	log_info("hash(%s): ", algo);
 	log_dump(hash, size);
 
-	pkey = read_priv_pkey(keyfile, imaevm_params.keypass);
+	pkey = read_priv_pkey(keyfile, keypass);
 	if (!pkey)
 		return -1;
 
@@ -1236,14 +1306,14 @@ err:
 
 int sign_hash(const char *hashalgo, const unsigned char *hash, int size, const char *keyfile, const char *keypass, unsigned char *sig)
 {
-	if (keypass)
-		imaevm_params.keypass = keypass;
+	if (!keypass)	/* Avoid breaking existing libimaevm usage */
+		keypass = imaevm_params.keypass;
 
 	if (imaevm_params.x509)
-		return sign_hash_v2(hashalgo, hash, size, keyfile, sig);
+		return sign_hash_v2(hashalgo, hash, size, keyfile, keypass, sig);
 #if CONFIG_SIGV1
 	else
-		return sign_hash_v1(hashalgo, hash, size, keyfile, sig);
+		return sign_hash_v1(hashalgo, hash, size, keyfile, keypass, sig);
 #endif
 	log_info("Signature version 1 deprecated.");
 	return -1;

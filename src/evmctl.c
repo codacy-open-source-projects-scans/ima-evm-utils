@@ -140,6 +140,8 @@ static bool evm_immutable;
 static bool evm_portable;
 static bool veritysig;
 static bool hwtpm;
+static char *g_hash_algo = DEFAULT_HASH_ALGO;
+static char *g_keypass;
 
 #define HMAC_FLAG_NO_UUID	0x0001
 #define HMAC_FLAG_CAPS_SET	0x0002
@@ -340,7 +342,8 @@ err:
  * Returns 0 for EVP_ function failures. Return -1 for other failures.
  * Return hash algorithm size on success.
  */
-static int calc_evm_hash(const char *file, unsigned char *hash)
+static int calc_evm_hash(const char *file, const char *hash_algo,
+			 unsigned char *hash)
 {
         const EVP_MD *md;
 	struct stat st;
@@ -408,10 +411,9 @@ static int calc_evm_hash(const char *file, unsigned char *hash)
 	}
 #endif
 
-	md = EVP_get_digestbyname(imaevm_params.hash_algo);
+	md = EVP_get_digestbyname(hash_algo);
 	if (!md) {
-		log_err("EVP_get_digestbyname(%s) failed\n",
-			imaevm_params.hash_algo);
+		log_err("EVP_get_digestbyname(%s) failed\n", hash_algo);
 		err = 0;
 		goto out;
 	}
@@ -564,18 +566,18 @@ out:
 	return err;
 }
 
-static int sign_evm(const char *file, const char *key)
+static int sign_evm(const char *file, char *hash_algo, const char *key)
 {
 	unsigned char hash[MAX_DIGEST_SIZE];
 	unsigned char sig[MAX_SIGNATURE_SIZE];
 	int len, err;
 
-	len = calc_evm_hash(file, hash);
+	len = calc_evm_hash(file, hash_algo, hash);
 	if (len <= 1)
 		return len;
 	assert(len <= sizeof(hash));
 
-	len = sign_hash(imaevm_params.hash_algo, hash, len, key, NULL, sig + 1);
+	len = sign_hash(hash_algo, hash, len, key, g_keypass, sig + 1);
 	if (len <= 1)
 		return len;
 	assert(len < sizeof(sig));
@@ -609,10 +611,10 @@ static int hash_ima(const char *file)
 {
 	unsigned char hash[MAX_DIGEST_SIZE + 2]; /* +2 byte xattr header */
 	int len, err, offset;
-	int algo = imaevm_get_hash_algo(imaevm_params.hash_algo);
+	int algo = imaevm_get_hash_algo(g_hash_algo);
 
 	if (algo < 0) {
-		log_err("Unknown hash algo: %s\n", imaevm_params.hash_algo);
+		log_err("Unknown hash algo: %s\n", g_hash_algo);
 		return -1;
 	}
 	if (algo > PKEY_HASH_SHA1) {
@@ -624,7 +626,7 @@ static int hash_ima(const char *file)
 		offset = 1;
 	}
 
-	len = ima_calc_hash(file, hash + offset);
+	len = ima_calc_hash2(file, g_hash_algo, hash + offset);
 	if (len <= 1)
 		return len;
 	assert(len + offset <= sizeof(hash));
@@ -632,7 +634,7 @@ static int hash_ima(const char *file)
 	len += offset;
 
 	if (imaevm_params.verbose >= LOG_INFO)
-		log_info("hash(%s): ", imaevm_params.hash_algo);
+		log_info("hash(%s): ", g_hash_algo);
 
 	if (sigdump || imaevm_params.verbose >= LOG_INFO)
 		imaevm_hexdump(hash, len);
@@ -650,18 +652,18 @@ static int hash_ima(const char *file)
 	return 0;
 }
 
-static int sign_ima(const char *file, const char *key)
+static int sign_ima(const char *file, char *hash_algo, const char *key)
 {
 	unsigned char hash[MAX_DIGEST_SIZE];
 	unsigned char sig[MAX_SIGNATURE_SIZE];
 	int len, err;
 
-	len = ima_calc_hash(file, hash);
+	len = ima_calc_hash2(file, hash_algo, hash);
 	if (len <= 1)
 		return len;
 	assert(len <= sizeof(hash));
 
-	len = sign_hash(imaevm_params.hash_algo, hash, len, key, NULL, sig + 1);
+	len = sign_hash(hash_algo, hash, len, key, g_keypass, sig + 1);
 	if (len <= 1)
 		return len;
 	assert(len < sizeof(sig));
@@ -751,7 +753,7 @@ static int sign_ima_file(const char *file)
 
 	key = imaevm_params.keyfile ? : "/etc/keys/privkey_evm.pem";
 
-	return sign_ima(file, key);
+	return sign_ima(file, g_hash_algo, key);
 }
 
 static int cmd_sign_ima(struct command *cmd)
@@ -843,7 +845,7 @@ static int cmd_sign_hash(struct command *cmd)
 			}
 
 			siglen = sign_hash(algo, sigv3_hash, hashlen / 2,
-					   key, NULL, sig + 1);
+					   key, g_keypass, sig + 1);
 
 			sig[0] = IMA_VERITY_DIGSIG;
 			sig[1] = DIGSIG_VERSION_3;	/* sigv3 */
@@ -854,8 +856,8 @@ static int cmd_sign_hash(struct command *cmd)
 			assert(hashlen / 2 <= sizeof(hash));
 			hex2bin(hash, line, hashlen / 2);
 
-			siglen = sign_hash(imaevm_params.hash_algo, hash,
-					   hashlen / 2, key, NULL, sig + 1);
+			siglen = sign_hash(g_hash_algo, hash,
+					   hashlen / 2, key, g_keypass, sig + 1);
 			sig[0] = EVM_IMA_XATTR_DIGSIG;
 		}
 
@@ -874,7 +876,6 @@ static int cmd_sign_hash(struct command *cmd)
 		print_usage(cmd);
 		return -1;
 	}
-
 	return 0;
 }
 
@@ -886,7 +887,7 @@ static int sign_evm_path(const char *file)
 	key = imaevm_params.keyfile ? : "/etc/keys/privkey_evm.pem";
 
 	if (digsig) {
-		err = sign_ima(file, key);
+		err = sign_ima(file, g_hash_algo, key);
 		if (err)
 			return err;
 	}
@@ -897,7 +898,7 @@ static int sign_evm_path(const char *file)
 			return err;
 	}
 
-	return sign_evm(file, key);
+	return sign_evm(file, g_hash_algo, key);
 }
 
 static int cmd_sign_evm(struct command *cmd)
@@ -905,10 +906,11 @@ static int cmd_sign_evm(struct command *cmd)
 	return do_cmd(cmd, sign_evm_path);
 }
 
-static int verify_evm(const char *file)
+static int verify_evm(struct public_key_entry *public_keys, const char *file)
 {
 	unsigned char hash[MAX_DIGEST_SIZE];
 	unsigned char sig[MAX_SIGNATURE_SIZE];
+	const char *hash_algo = NULL;
 	int sig_hash_algo;
 	int mdlen;
 	int len;
@@ -938,18 +940,20 @@ static int verify_evm(const char *file)
 		log_err("unknown hash algo: %s\n", file);
 		return -1;
 	}
-	imaevm_params.hash_algo = imaevm_hash_algo_by_id(sig_hash_algo);
+	hash_algo = imaevm_hash_algo_by_id(sig_hash_algo);
 
-	mdlen = calc_evm_hash(file, hash);
+	mdlen = calc_evm_hash(file, hash_algo, hash);
 	if (mdlen <= 1)
 		return mdlen;
 	assert(mdlen <= sizeof(hash));
 
-	return verify_hash(file, hash, mdlen, sig, len);
+	return imaevm_verify_hash(public_keys, file, hash_algo, hash,
+				  mdlen, sig, len);
 }
 
 static int cmd_verify_evm(struct command *cmd)
 {
+	struct public_key_entry *public_keys = NULL;
 	char *file = g_argv[optind++];
 	int err;
 
@@ -961,18 +965,26 @@ static int cmd_verify_evm(struct command *cmd)
 
 	if (imaevm_params.x509) {
 		if (imaevm_params.keyfile) /* Support multiple public keys */
-			init_public_keys(imaevm_params.keyfile);
+			err = imaevm_init_public_keys(imaevm_params.keyfile,
+						      &public_keys);
 		else			   /* assume read pubkey from x509 cert */
-			init_public_keys("/etc/keys/x509_evm.der");
+			err = imaevm_init_public_keys("/etc/keys/x509_evm.der",
+						      &public_keys);
+		if (err < 0) {
+			log_info("Failed loading public keys");
+			return err;
+		}
 	}
 
-	err = verify_evm(file);
+	err = verify_evm(public_keys, file);
 	if (!err && imaevm_params.verbose >= LOG_INFO)
 		log_info("%s: verification is OK\n", file);
+
+	imaevm_free_public_keys(public_keys);
 	return err;
 }
 
-static int verify_ima(const char *file)
+static int verify_ima(struct public_key_entry *public_keys, const char *file)
 {
 	unsigned char sig[MAX_SIGNATURE_SIZE];
 	int len;
@@ -999,20 +1011,14 @@ static int verify_ima(const char *file)
 		}
 	}
 
-	return ima_verify_signature(file, sig, len, NULL, 0);
+	return ima_verify_signature2(public_keys, file, sig, len, NULL, 0);
 }
 
 static int cmd_verify_ima(struct command *cmd)
 {
+	struct public_key_entry *public_keys = NULL;
 	char *file = g_argv[optind++];
 	int err, fails = 0;
-
-	if (imaevm_params.x509) {
-		if (imaevm_params.keyfile) /* Support multiple public keys */
-			init_public_keys(imaevm_params.keyfile);
-		else			   /* assume read pubkey from x509 cert */
-			init_public_keys("/etc/keys/x509_evm.der");
-	}
 
 	if (!file) {
 		log_err("Parameters missing\n");
@@ -1020,13 +1026,28 @@ static int cmd_verify_ima(struct command *cmd)
 		return -1;
 	}
 
+	if (imaevm_params.x509) {
+		if (imaevm_params.keyfile) /* Support multiple public keys */
+			err = imaevm_init_public_keys(imaevm_params.keyfile,
+						      &public_keys);
+		else			   /* assume read pubkey from x509 cert */
+			err = imaevm_init_public_keys("/etc/keys/x509_evm.der",
+						      &public_keys);
+		if (err < 0) {
+			log_info("Failed loading public keys");
+			return err;
+		}
+	}
+
 	do {
-		err = verify_ima(file);
+		err = verify_ima(public_keys, file);
 		if (err)
 			fails++;
 		if (!err && imaevm_params.verbose >= LOG_INFO)
 			log_info("%s: verification is OK\n", file);
 	} while ((file = g_argv[optind++]));
+
+	imaevm_free_public_keys(public_keys);
 	return fails > 0;
 }
 
@@ -1406,7 +1427,7 @@ static int cmd_hmac_evm(struct command *cmd)
 	key = imaevm_params.keyfile ? : "/etc/keys/privkey_evm.pem";
 
 	if (digsig) {
-		err = sign_ima(file, key);
+		err = sign_ima(file, g_hash_algo, key);
 		if (err)
 			return err;
 	}
@@ -1606,7 +1627,8 @@ static int lookup_template_name_entry(char *template_name)
 	return 0;
 }
 
-void ima_ng_show(struct template_entry *entry)
+static void ima_ng_show(struct public_key_entry *public_keys,
+			struct template_entry *entry)
 {
 	uint8_t *fieldp = entry->template;
 	uint32_t field_len;
@@ -1732,10 +1754,12 @@ void ima_ng_show(struct template_entry *entry)
 		 * the measurement list or calculate the hash.
 		 */
 		if (verify_list_sig)
-			err = ima_verify_signature(path, sig, sig_len,
-						   digest, digest_len);
+			err = ima_verify_signature2(public_keys, path,
+						    sig, sig_len,
+						    digest, digest_len);
 		else
-			err = ima_verify_signature(path, sig, sig_len, NULL, 0);
+			err = ima_verify_signature2(public_keys, path,
+						    sig, sig_len, NULL, 0);
 
 		if (!err && imaevm_params.verbose > LOG_INFO)
 			log_info("%s: verification is OK\n", path);
@@ -2206,6 +2230,7 @@ static int read_tpm_banks(int num_banks, struct tpm_bank_info *bank)
 
 static int ima_measurement(const char *file)
 {
+	struct public_key_entry *public_keys = NULL;
 	struct tpm_bank_info *pseudo_padded_banks;
 	struct tpm_bank_info *pseudo_banks = NULL;
 	struct tpm_bank_info *tpm_banks = NULL;
@@ -2244,10 +2269,16 @@ static int ima_measurement(const char *file)
 	}
 
 	if (imaevm_params.keyfile)	/* Support multiple public keys */
-		init_public_keys(imaevm_params.keyfile);
+		err = imaevm_init_public_keys(imaevm_params.keyfile,
+					      &public_keys);
 	else				/* assume read pubkey from x509 cert */
-		init_public_keys("/etc/keys/x509_evm.der");
-	if (errno)
+		err = imaevm_init_public_keys("/etc/keys/x509_evm.der",
+					      &public_keys);
+	/*
+	 * Without public keys, cannot validate signatures, but can
+	 * still calculate and verify the measurement list against TPM PCRs.
+	 */
+	if (errno || err < 0)
 		log_errno_reset(LOG_DEBUG,
 				"Failure in initializing public keys");
 
@@ -2397,7 +2428,7 @@ static int ima_measurement(const char *file)
 		if (is_ima_template)
 			ima_show(&entry);
 		else
-			ima_ng_show(&entry);
+			ima_ng_show(public_keys, &entry);
 
 		if (!tpmbanks)
 			continue;
@@ -2456,6 +2487,7 @@ out_free:
 	free(pseudo_banks);
 	free(pseudo_padded_banks);
 	free(entry.template);
+	imaevm_free_public_keys(public_keys);
 
 	return err;
 }
@@ -3057,13 +3089,13 @@ int main(int argc, char *argv[])
 			sigdump = 1;
 			break;
 		case 'a':
-			imaevm_params.hash_algo = optarg;
+			g_hash_algo = optarg;
 			break;
 		case 'p':
 			if (optarg)
-				imaevm_params.keypass = optarg;
+				g_keypass = optarg;
 			else
-				imaevm_params.keypass = get_password();
+				g_keypass = get_password();
 			break;
 		case 'f':
 			sigfile = 1;
@@ -3205,8 +3237,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (!imaevm_params.keypass)
-		imaevm_params.keypass = getenv("EVMCTL_KEY_PASSWORD");
+	if (!g_keypass)
+		g_keypass = getenv("EVMCTL_KEY_PASSWORD");
 
 	if (imaevm_params.keyfile != NULL &&
 	    imaevm_params.eng == NULL &&
