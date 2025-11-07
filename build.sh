@@ -77,10 +77,16 @@ $CC --version
 echo "CFLAGS: '$CFLAGS'"
 echo "LDFLAGS: '$LDFLAGS'"
 echo "PREFIX: '$PREFIX'"
+echo "TESTGROUP: '$TESTGROUP'"
+
+disable_kernel_tests=""
+if [ "$TESTGROUP" != "kernel" ]; then
+	disable_kernel_tests="--disable-kerneltests"
+fi
 
 title "configure"
 ./autogen.sh
-./configure --prefix=$PREFIX $host || log_exit config.log "configure failed"
+./configure --prefix=$PREFIX $disable_kernel_tests $host || log_exit config.log "configure failed"
 
 title "make"
 make -j$(nproc)
@@ -101,8 +107,6 @@ if [ $ret -eq 0 ]; then
 	exit 0
 fi
 
-cat tests/test-suite.log
-
 if [ $ret -eq 77 ]; then
 	msg="WARN: some tests skipped"
 	ret=0
@@ -110,4 +114,4 @@ else
 	msg="FAIL: tests exited: $ret"
 fi
 
-log_exit tests/test-suite.log "$msg" $ret
+log_exit "tests/test-suite.log tests/kernel/test-suite.log" "$msg" $ret

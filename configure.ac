@@ -67,6 +67,10 @@ AC_ARG_ENABLE(provider,
 	AC_CHECK_LIB([crypto], [OSSL_PROVIDER_load],, [enable_provider=no])
 	AM_CONDITIONAL([CONFIG_IMA_EVM_PROVIDER], [test "x$enable_provider" = "xyes"])
 
+AC_ARG_ENABLE(kerneltests,
+	      [AS_HELP_STRING([--enable-kerneltests], [Run the kernel tests (default: yes)])], [enable_kerneltests=$enableval], [enable_kerneltests=yes])
+	AM_CONDITIONAL([KERNEL_TESTS], [test "x$enable_kerneltests" = "xyes"])
+
 #debug support - yes for a while
 PKG_ARG_ENABLE(debug, "yes", DEBUG, [Enable Debug support])
 if test $pkg_cv_enable_debug = yes; then
@@ -87,6 +91,7 @@ AX_DEFAULT_HASH_ALGO([$KERNEL_HEADERS])
 AC_CONFIG_FILES([Makefile
 		src/Makefile
 		tests/Makefile
+		tests/kernel/Makefile
 		doc/Makefile
 		doc/sf/Makefile
 		packaging/ima-evm-utils.spec
@@ -106,6 +111,7 @@ echo    "         ibmtss: $ac_cv_header_ibmtss_tss_h"
 echo    "         sigv1:  $enable_sigv1"
 echo    "         engine: $enable_engine"
 echo    "       provider: $enable_provider"
+echo    "   kernel-tests: $enable_kerneltests"
 echo	"            doc: $have_doc"
 echo	"         pandoc: $have_pandoc"
 echo
